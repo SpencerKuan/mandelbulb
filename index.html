@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<!--
+
+    Drag to rotate, scroll to enlarge.
+    Warning: this might require a powerful GPU
+
+    Major credit to Henry (@staplecactus764) for providing the distance estimator for the set used in this program.
+
+-->
+
+
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>3D Mandlebulb Fractal</title>
+    
+    <style>
+        * {
+            padding: 0;
+            margin: 0;
+        }
+        body {
+            overflow: hidden;
+            text-align: center;
+            background: #000;
+        }
+        canvas {
+            width: min(100vw, 100vh);
+            height: min(100vw, 100vh);
+        }
+        .controls {
+            color: #fff;
+            position: fixed;
+            
+            right: 0;
+            bottom: 0;
+            margin: 20px;
+        }
+    </style>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/10.5.3/math.js"></script>
+</head>
+<body>
+
+    <div class="controls">
+    <input type="checkbox" id="shouldAnimate">
+        Animate
+    </div>
+    <canvas id="output"></canvas>
+    
+    <!-- vertex shader -->
+    <script id="vertex" type="glsl">
+        attribute vec4 a_position;
+        void main(){
+            gl_Position = a_position;
+        }
+    </script>
+    
+    <!-- fragment shader (main shader) -->
+    <script id="fragment" type="glsl">
+        precision lowp float;
+        
+        #define DELAG
+        
+        uniform vec2 u_res;
+        uniform float u_time;
+        uniform float u_animate;
+        uniform mat3 u_rot;
+        uniform float u_zoom;
+        
+        struct Hit {
+            vec3 pos;
+            bool hit;
+        };
+        
+        float eps, epsCone;
+        float iterationCount = 0.0;
+        
+        float power = u_animate*(sin(u_time * 0.0005) * 4.) + 8.0;
+    
+        // Mandelbub code provided by Henry
+        // -sourced from a Sebastian League video
+        
+        #ifdef DELAG
+        
+        float map (vec3 position) {
+            vec3 z = position;
+            float dr = 1.0;
+            float r;
+            
+            float its = 0.0;
+            
+            // series loop
+            for (int i = 0; i < 10; i ++) {
+                r = length (z);
+                if (r > 2.0) break;
+                   
+                float theta = acos (z.z / r) * 8.0;
+                float phi = atan (z.y, z.x) * 8.0;
+                float zr = r*r*r*r*r*r*r*r;
+                dr = r*r*r*r*r*r*r * 8.0 * dr + 1.0;
+                
+                z = zr * vec3(
+                    sin (theta) * cos (phi), 
+                    sin (phi) * sin (theta),
+                    cos (theta)
+                );
+                
+                z += position;
+                its += 1.0;
+            }
+            
+            iterationCount = its - log2(log2(length(z)));
+            
+            // distance approximation
+            return 0.5 * log (r) * r / dr;
+        }
+        
+        #else
+        float map (vec3 position) {
+            vec3 z = position;
+            float dr = 1.0;
+            float r;
+            
+            float its = 0.0;
+            
+            // series loop
+            for (int i = 0; i < 10; i ++) {
+                r = length (z);
+                if (r > 2.0) break;
+                   
+                float theta = acos (z.z / r) * power;
+                float phi = atan (z.y, z.x) * power;
+                float zr = pow(r, power);
+                dr = pow(r, power - 1.0) * power * dr + 1.0;
+                
+                z = zr * vec3(
+                    sin (theta) * cos (phi), 
+                    sin (phi) * sin (theta),
+                    cos (theta)
+                );
+                
+                z += position;
+                its += 1.0;
+            }
+            
+            iterationCount = its - log2(log2(length(z)));
+            
+            // distance approximation
+            return 0.5 * log (r) * r / dr;
+        }
+        #endif
+        
+        // traces a ray in a given direction
+        Hit trace (vec3 ro, vec3 rd){
+            float maxDist = 5.0;
+            const int maxSteps = 128;
+            
+            float t = 0.0, d;
+            for(int i = 0; i < maxSteps; i ++){
+                d = map(ro + rd * t);
+                t += d;
+                eps = epsCone * t;
+                
+                if (d < eps) return Hit(ro + rd * t, true);
+                if (t > maxDist) return Hit(ro, false);
+            }
+            
+            return Hit(ro, false);
+        }
+        
+        // calculate a normal using a central differences technique
+        vec3 getNormal (vec3 ro){
+            vec2 eps2 = vec2(eps, 0);
+            return normalize(vec3(
+                map(ro + eps2.xyy) - map(ro - eps2.xyy),
+                map(ro + eps2.yxy) - map(ro - eps2.yxy),
+                map(ro + eps2.yyx) - map(ro - eps2.yyx)
+            ));
+        }
+        
+        
+        // render colors
+        const vec3 col1 = vec3(0.5);
+        const vec3 col2 = vec3(0.4, 0.3, 0.2);
+    
+        void main (){
+            // screen coordinate (100x100)
+            vec2 screen = (gl_FragCoord.xy - u_res * .5) / u_res * 100.;
+            vec3 screenPixel = vec3(100.0 / u_res, 0);
+            
+            // ray setup
+            vec3 cam = u_rot * vec3(0, 0, 2.8) * u_zoom;
+            vec3 view = normalize(vec3(screen, -90.0));
+            
+            // epsilon cone calculation
+            vec3 left = vec3(screen-screenPixel.xz, -90.);
+            vec3 up = vec3(screen-screenPixel.zy, -90.);
+            left = normalize(left);
+            up = normalize(up);
+            epsCone = min((left-view).x, (up-view).y) / view.z;
+            
+            // rotated view direction
+            view = u_rot * view;
+            
+            // first intersection (no bounce)
+            Hit firstHit = trace(cam, view);
+            
+            // output color
+            vec3 col = vec3(0, 0, 0);
+            
+            if (firstHit.hit){
+                vec3 normal = getNormal(firstHit.pos) * u_rot;
+                vec3 albedo = normal * 0.5 + 0.5;
+                
+                // basic lighting
+                float l = max(dot(normal, normalize(vec3(2))), 0.);
+                l = l + 0.5 + pow(l, 10.0);
+                albedo = mix(col1, col2, log(0.7 * iterationCount));
+                
+                // output value
+                col = l * albedo;
+            }
+            
+            // gamma correction
+            // col = pow(col, vec3(1.0 / 2.2));
+            
+            // screen output
+            gl_FragColor = vec4(col, 1);
+        }
+    </script>
+     
+    
+    <script src="renderUtil.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/SpencerKuan/webgl_basic@82beaf7bd1c5d864be4242ecb8e4d78e9678b6e2/ray.js"></script>
+    <script src="render.js"></script>
+</body>
+</html>
